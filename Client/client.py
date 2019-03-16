@@ -7,8 +7,10 @@ from Helper.HstMessage import *
 from Helper.HstSendWindow import *
 
 sys.path.append("..")
+sys.path.append(r"c:\programdata\miniconda3\lib\site-packages")
 from Helper import *
 from Utils.Log import *
+import progressbar
 
 from socket import *
 import json
@@ -197,6 +199,144 @@ class HstClient:
                     self.lock.release()
                     break
             self.lock.release()
+
+        first_message = HstMessage(seqnum=item.seqnum, content_size=len(item.content), content=item.content)
+        self.udpClient.sendto(first_message.pack(), (self.host, self.port))
+        # 设置超时定时器
+        self.timer = threading.Timer(self.TimeoutInterval, self.TimeoutAndReSend)
+        self.timer.start()
+
+        self.origin_time = time.time()
+        self.last_time = time.time()
+        self.last_recvsize = 0
+        self.compute_result = 0
+        self.total_result = 0
+
+        recvSize = 0
+        while(True):
+            # 接收信息
+            try:
+                message = self.udpClient.recv(2048)
+            except Exception as e:
+                if filesize == recvSize:
+                    progressbar.pbar.finish()
+                    log_info("服务器端接收完毕")
+                    self.timer.cancel()
+                else:
+                    log_error("超时重连失败")
+                    self.timer.cancel()
+                break
+            message = HstMessage.unpack(message)
+            acknum = message.acknum
+
+            self.lock.acquire()
+            # 更新滑动窗口
+            if self.cwnd < self.ssthresh:
+                self.cwnd += 1
+            else:
+                self.cwnd += 1/int(self.cwnd)
+            # 更新rwnd
+            self.send_window.ACKseqnum(acknum)
+            self.rwnd = message.rwnd
+            self.send_window.rwnd = message.rwnd
+            if self.send_window.getACKTimeBySeqnum(acknum) == 4:
+                # 三次冗余进行重传，同时更新cwnd和ssthresh
+                self.ssthresh = self.cwnd / 2
+                self.cwnd = self.cwnd/2 + 3
+                r_content = self.send_window.getContentBySeqnum(acknum)
+                r_message = HstMessage(seqnum=acknum, content_size=len(r_content), content=r_content)
+                self.udpClient.sendto(r_message.pack(), (self.host, self.port))
+                # 重新设置超时定时器
+                self.timer.cancel()
+                self.timer = threading.Timer(self.TimeoutInterval, self.TimeOutAndReSend)
+                self.timer.start()
+            elif self.send_window.getACKTimeBySeqnum(acknum) == 1:
+                # 首次接收到，send_base改变
+                recvSize += self.send_window.updateSendBase(acknum)
+                List = self.send_window.getSendList(self.cwnd)
+                for item in List:
+                    message = HstMessage(seqnum=item.seqnum, content_size=len(item.content), content=item.content)
+                    self.udpClient.sendto(message.pack(), (self.host, self.port))
+                # 重新设置定时器
+                self.timer.cancel()
+                self.timer = threading.Timer(self.TimeoutInterval, self.TimeOutAndSend)
+                self.timer.start()
+            elif self.send_window.getACKTimeBySeqnum(acknum) == -1:
+                recvSize = filesize
+                self.UploadProgress(recvSize, filesize)
+                log_info("服务器接收完毕")
+                self.timer.cancel()
+                self.lock.release()
+                break
+
+            self.lock.release()
+            self.UpLoadProgress(recvSize, filesize)
+
+            if filesize == recvSize:
+                progressbar.pbar.finish()
+                log_info("服务端接收完毕")
+                self.timer.cancel()
+                break
+
+    def DownLoadProgress(self, recvSize, filesize):
+        time_change = time.time() - self.last_time
+        size_change = recvSize - self.last_recvsize
+        if(time_change >= 0.7):
+            self.last_time = time.time()
+            self.last_recvsize = recvSize
+            self.compute_result = size_change/time_change/1024
+            self.total_result = recvSize/(time.time() - self.origin_time)/1024
+        print('\r%d/%d  已经下载： %d%%  当前下载速度： %d kb/s  平均下载速度： %d kb/s' % \
+            (recvSize, filesize, int(recvSize/filesize*100), self.compute_result, self.total_result), end='')
+        if recvSize == filesize:
+            print("")
+
+    # 定时器，超时重传，必定重传的是send_base
+    def TimeOutAndReSend(self):
+        self.lock.acquire()
+        self.ssthresh = self.cwnd/2
+        self.cwnd = 1
+        seqnum = self.send_window.send_base
+        content = self.send_window.getContentBySeqnum(seqnum)
+        self.lock.release()
+        if content == None:
+            return
+        message = HstMessage(seqnum=seqnum, content_size=len(content), content=content)
+        self.udpClient.sendto(message.pack(), (self.host, self.port))
+        self.timer.cancel()
+        self.timer = threading.Timer(self.timer.interval*2, self.TimeOutAndReSend)
+        self.timer.start()
+
+    def DownloadFile(self, filename):
+        # 发起握手连接
+        self.handshake("DOWNLOAD", filename)
+        # 握手完毕未进入连接建立状态，退出
+        if self.state != State.ESTABLISH:
+            log_error("连接建立失败，无法下载文件")
+            self.state = State.CLOSED
+            return
+        filename = self.fileInfo["filename"]
+        filesize = self.fileInfo["filesize"]
+
+        self.recv_base = 0  # 当前窗口基序号
+        self.N = 1000  # 窗口大小
+        self.window = []  # 接收方窗口
+        for i in range(self.N):
+            self.window.append(None)
+
+        self.origin_time = time.time()
+        self.last_time = time.time()
+        self.last_recvsize = 0
+        self.compute_result = 0
+        self.total_result = 0
+        recvsize = 0
+
+        log_info("开始接收文件 %s" % (filename))
+        while True:
+            try:
+                message = self.udpClient.recv(2048)
+
+
 
                         
 
