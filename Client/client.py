@@ -64,7 +64,11 @@ class HstClient:
         elif HstCmd == "DOWNLOAD":
             self.ControlHandshake()
             self.DownloadFile(filename)
-        elif HstCmd == "LIST":
+        else:
+            print(">>>>>找不到该命令")
+
+    def start_cmd(self, HstCmd):
+        if HstCmd == "LIST":
             print(os.listdir())
         elif HstCmd == "CD":
             print(os.chdir("../"))
@@ -332,9 +336,107 @@ class HstClient:
         recvsize = 0
 
         log_info("开始接收文件 %s" % (filename))
-        while True:
-            try:
-                message = self.udpClient.recv(2048)
+        with open(filename, 'wb') as f:
+            self.udpClient.settimeout(2)
+            while True:
+                try:
+                    message = self.udpClient.recv(2048)
+                except Exception as e:
+                    if(recvsize == filesize):
+                        log_info("接收完毕，连接断开")
+                    else:
+                        log_error("连接已断开")
+                    break
+                message = HstMessage.unpack(message)
+                seqnum = message.seqnum
+                content = message.content
+                content_size = message.content_size
+                if(seqnum >= self.recv_base and seqnum < self.recv_base + self.N):
+                    self.window[seqnum - self.recv_base] = content[:content_size]
+                while self.window[0] != None:
+                    f.write(self.window[0])
+                    recvsize += len(self.window[0])
+                    self.DownLoadProgress(recvsize, filesize)
+                    self.window.pop(0)
+                    self.window.append(None)
+                    self.recv_base += 1
+
+                rwnd = 0
+                for item in self.window:
+                    if item == None:
+                        rwnd += 1
+                    response = HstMessage(ACK = 1, seqnum=seqnum, rwnd=rwnd, acknum=self.recv_base)
+
+                if(seqnum <= self.recv_base + self.N):
+                    self.udpClient.sendto(response.pack(), (self.host, self.port))
+
+    # 显示上传进度函数
+    def UpLoadProgress(self, recvSize, filesize):
+        time_change = time.time() - self.last_time
+        size_change = recvSize - self.last_recvsize
+        if(time_change >= 0.7):
+            self.last_time = time.time()
+            self.last_recvsize = recvSize
+            self.compute_result = size_change/time_change/1024
+            self.total_result = recvSize / (time.time() - self.origin_time) / 1024
+        print('\r%d/%d  已经上传： %d%%  当前上传速度： %d kb/s  平均上传速度： %d kb/s' % \
+              (recvSize, filesize, int(recvSize / filesize * 100), self.compute_result, self.total_result), end='')
+        if recvSize == filesize:
+            print("")
+
+def getHelp():
+        tip = "指令格式：\n" + \
+              "  发送文件: HST lsend myserver mylargefile\n" + \
+              "  下载文件: HST lget myserver mylargefile\n" + \
+              "参数设置：\n" + \
+              "  myserver：url地址或者ip地址\n" + \
+              "  mylargefile： 文件路径"
+        print('\033[33m%s' % tip)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 5:
+        getHelp()
+    else:
+        if sys.argv[1] != "HST":
+            getHelp()
+        else:
+            if sys.argv[2] == "lsend":
+                IP = sys.argv[3]
+                filename = sys.argv[4]
+                client = HstClient("127.0.0.1", 12345, 1024)
+                client.start("UPLOAD", filename)
+            elif sys.argv[2] == "lget":
+                IP = sys.argv[3]
+                filename = sys.argv[4]
+                client = HstClient("127.0.0.1", 12345, 1024)
+                client.start("DOWNLOAD", filename)
+            elif sys.argv[2] == "lget":
+                IP = sys.argv[3]
+                filename = sys.argv[4]
+                client = HstClient("127.0.0.1", 12345, 1024)
+                client.start("DOWNLOAD", filename)
+            else:
+                getHelp()
+    cmd = input(">>>>>>")
+    if cmd == "up":
+        IP = "127.0.0.1"
+        filename = input("input the filename which you want to upload:")
+        client = HstClient("127.0.0.1", 12345, 1024)
+        client.start("UPLOAD", filename)
+    elif cmd == "down":
+        IP = "127.0.0.1"
+        filename = input("input the filename which you want to upload:")
+        client = HstClient("127.0.0.1", 12345, 1024)
+        client.start("DOWNLOAD", filename)
+    elif cmd == "list":
+        client.start_cmd("LIST")
+    elif cmd == "cd":
+        client.start_cmd("CD")
+
+
+
+
 
 
 
